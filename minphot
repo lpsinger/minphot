@@ -1,0 +1,79 @@
+#!/usr/bin/env python
+from __future__ import print_function
+import glob
+import ccdproc
+import os
+import sys
+
+srcpath, _ = os.path.split(__file__)
+
+c = ccdproc.ImageFileCollection(location='.', filenames=sys.argv[1:])
+s = c.summary
+s = s[(s['obstype'] == 'OBJECT') | (s['obstype'] == 'SKY FLAT')]
+all_targets = []
+clean_targets = []
+
+with open('Makefile', 'w') as f:
+    print('.DEFAULT_GOAL := all', file=f)
+    print(file=f)
+    print('%.fits:', file=f)
+    print('\t' + os.path.join(srcpath, 'minphot-combine'), '$^ -o $@', file=f)
+    print(file=f)
+    print('%.cat: %.fits', file=f)
+    print('\tsex $< -c', os.path.join(srcpath, 'sextractor.config'), '-PARAMETERS_NAME', os.path.join(srcpath, 'sextractor.param'), '-FILTER_NAME', os.path.join(srcpath, 'sextractor.conv'), '-CATALOG_NAME $@', file=f)
+
+    target = 'bias.fits'
+    clean_targets.append(target)
+    print(file=f)
+    print(target + ':', *c.files_filtered(obstype='BIAS'), file=f)
+
+    for g1 in s.group_by('filter1').groups:
+        filt = g1[0]['filter1']
+        for g2 in g1.group_by('obstype').groups:
+            obstype = g2[0]['obstype']
+            if obstype == 'SKY FLAT':
+                target = filt + '.flat.fits'
+                clean_targets.append(target)
+                print(file=f)
+                print(target, ':', 'bias.fits', *g2['file'], file=f)
+            elif obstype == 'OBJECT':
+                for g3 in g2.group_by('object').groups:
+                    obj = g3[0]['object']
+                    fits_targets = []
+                    cat_targets = []
+                    head_targets = []
+                    for r in g3:
+                        target = 'reduced.' + r['file'].replace('.fits', '.cat')
+                        cat_targets.append(target)
+                        clean_targets.append(target)
+                        target = 'reduced.' + r['file'].replace('.fits', '.head')
+                        head_targets.append(target)
+                        clean_targets.append(target)
+                        target = 'reduced.' + r['file']
+                        fits_targets.append(target)
+                        clean_targets.append(target)
+                        print(file=f)
+                        print(target, ':', r['file'], filt + '.flat.fits', 'bias.fits', file=f)
+                    print(file=f)
+                    print(*head_targets, end='', file=f)
+                    print(':', *cat_targets, file=f)
+                    print('\tscamp', '-WRITE_XML', 'N', '$^', file=f)
+                    target = obj + '.' + filt + '.fits'
+                    all_targets.append(target)
+                    clean_targets.append(target)
+                    print(file=f)
+                    print(target, ':', *(fits_targets + head_targets), file=f)
+                    print('\tswarp', '-WRITE_XML', 'N', '-IMAGEOUT_NAME', '$@', *fits_targets, file=f)
+                    cat_target = obj + '.' + filt + '.cat'
+                    all_targets.append(cat_target)
+                    clean_targets.append(cat_target)
+                    print(file=f)
+                    print(cat_target, ':', target, file=f)
+
+    print(file=f)
+    print('all:', *all_targets, file=f)
+    print(file=f)
+    print('clean:', file=f)
+    print('\trm', '-f', *clean_targets, file=f)
+
+os.execlp('make', 'make')

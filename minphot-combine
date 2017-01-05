@@ -1,0 +1,56 @@
+#!/usr/bin/env python
+import argparse
+import ccdproc
+import numpy as np
+
+parser = argparse.ArgumentParser()
+parser.add_argument('filenames', nargs='+')
+parser.add_argument('-o', '--output', required=True)
+args = parser.parse_args()
+
+def process(ccd, **kwargs):
+    # BIASSEC gives the overscan region on the CCD, but does not necessarily
+    # extend over all rows of the CCD. Ignore the rows.
+    try:
+        oscan = ccd.header.pop('biassec').split(',')[0] + ',:]'
+    except KeyError:
+        oscan = None
+    trim = ccd.header.pop('trimsec', None)
+    kwargs = dict(oscan=oscan, trim=trim, **kwargs)
+    ccd = ccdproc.ccd_process(ccd, **kwargs)
+
+    # Delete extraneous headers (they confuse scamp)
+    del ccd.header['CTYPE1U']
+    del ccd.header['CRPIX1U']
+    del ccd.header['CRVAL1U']
+    del ccd.header['CD1_1U']
+    del ccd.header['CFINT1']
+    del ccd.header['CTYPE2U']
+    del ccd.header['CRPIX2U']
+    del ccd.header['CRVAL2U']
+    del ccd.header['CD2_2U']
+    del ccd.header['CD1_2U']
+    del ccd.header['CD2_1U']
+    del ccd.header['CFINT2']
+
+    return ccd
+
+c = ccdproc.ImageFileCollection(location='.', filenames=args.filenames)
+
+if all(c.summary['obstype'] == 'BIAS'):
+    ccdproc.combine(
+        [process(ccd) for ccd in c.ccds()],
+        method='median', output_file=args.output)
+elif all((c.summary['obstype'] == 'SKY FLAT') | (c.summary['obstype'] == 'BIAS')):
+    bias, = c.ccds(obstype='BIAS')
+    flats = [process(ccd, master_bias=bias) for ccd in c.ccds(obstype='SKY FLAT')]
+    ccdproc.combine(
+        flats,
+        method='median', scale=lambda data: 1 / np.mean(data),
+        output_file=args.output)
+else:
+    bias, = c.ccds(obstype='BIAS')
+    flat, = c.ccds(obstype='SKY FLAT')
+    obj, = c.ccds(obstype='OBJECT')
+    ccd = process(obj, master_bias=bias, master_flat=flat, exposure_key='exptime')
+    ccd.write(args.output)
