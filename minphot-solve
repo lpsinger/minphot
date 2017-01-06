@@ -1,0 +1,140 @@
+#!/usr/bin/env python
+
+# Imports
+from __future__ import division
+import argparse
+from astropy.table import Table
+from astropy.coordinates import Angle, SkyCoord
+from astroquery.sdss import SDSS
+import numpy as np
+import scipy.odr
+
+# FIXME: should be a command line argument
+band = 'r'
+
+# Command line interface
+parser = argparse.ArgumentParser()
+parser.add_argument('catalog')
+parser.add_argument(
+    '--match-radius', metavar='ARCSEC', type=Angle, default='1"',
+    help='catalog cross-match radius [default: %(default)s]')
+parser.add_argument(
+    '--sigma-clip-iters', metavar='N', type=int, default=5,
+    help='number of sigma-clipping iterations [default: %(default)s]')
+parser.add_argument(
+    '--sigma-clip', metavar='NSIGMA', type=float, default=3,
+    help='maximum number of standard deviations for sigma-clipping [default: %(default)s]')
+parser.add_argument(
+    '--plot', metavar='PLOT.png',
+    help='optional output file for diagnostic plots')
+args = parser.parse_args()
+
+# Read input catalog
+cat = Table.read(args.catalog, hdu='LDAC_OBJECTS')
+
+# Clean up input catalog
+cat = cat[
+    # Keep only objects that had no SExtractor flags
+    (cat['FLAGS'] == 0)
+]
+del cat['FLAGS']
+
+cat_coords = SkyCoord(cat['ALPHAWIN_J2000'], cat['DELTAWIN_J2000'])
+
+# Calculate field for reference catalog query
+center = SkyCoord(cat_coords.cartesian.sum(), representation='unitspherical')
+radius = center.separation(cat_coords).max() + args.match_radius
+
+# Obtain reference catalog
+ref_mag_key = 'psfMag_' + band
+ref_magerr_key = 'psfMagerr_' + band
+fields = ['ra', 'dec', 'type', 'clean', ref_mag_key, ref_magerr_key]
+ref = SDSS.query_region(center, radius=radius, photoobj_fields=fields)
+
+# Clean up reference catalog
+ref = ref[
+    # Keep only stars
+    (ref['type'] == 6) &
+    # Keep only clean photometry
+    (ref['clean'] == 1) &
+    # Keep only sane photometry
+    (ref[ref_mag_key] > 0)
+]
+del ref['type'], ref['clean']
+
+ref_coords = SkyCoord(ref['ra'], ref['dec'], unit=('deg', 'deg'))
+
+# Cross-match catalogs
+idx, sep, _ = cat_coords.match_to_catalog_sky(ref_coords)
+keep = sep < args.match_radius
+ref_matches = ref[idx[keep]]
+cat_matches = cat[keep]
+
+# Get photometry of matching stars
+cat_mag = -2.5 * np.log10(cat_matches['FLUX_AUTO'])
+cat_magerr = 2.5 / np.log(10) * cat_matches['FLUXERR_AUTO'] / cat_matches['FLUX_AUTO']
+ref_mag = ref_matches[ref_mag_key]
+ref_magerr = ref_matches[ref_magerr_key]
+
+orig_cat_mag = cat_mag
+orig_ref_mag = ref_mag
+orig_cat_magerr = cat_magerr
+orig_ref_magerr = ref_magerr
+
+# Calculate photometric solution with outlier rejection
+for _ in range(args.sigma_clip_iters):
+    # Perform orthogonal data regression
+    # data = scipy.odr.RealData(cat_mag, ref_mag, sx=cat_magerr, sy=ref_magerr)
+    data = scipy.odr.RealData(cat_mag, ref_mag, sx=cat_magerr, sy=ref_magerr)
+    odr = scipy.odr.ODR(data, scipy.odr.unilinear)
+    fit = odr.run()
+
+    dx2 = np.square(fit.delta)
+    dy2 = np.square(fit.eps)
+    ds = np.sqrt(dx2 / np.mean(dx2) + dy2 / np.mean(dy2))
+    keep = ds < args.sigma_clip
+    cat_mag = cat_mag[keep]
+    ref_mag = ref_mag[keep]
+    cat_magerr = cat_magerr[keep]
+    ref_magerr = ref_magerr[keep]
+
+if args.plot:
+    from matplotlib import pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    fig = plt.figure(figsize=(6, 8))
+    gs = GridSpec(2, 1, height_ratios=[3, 1], hspace=0.1)
+    ax = fig.add_subplot(gs[0])
+
+    ax.errorbar(orig_cat_mag, orig_ref_mag,
+                xerr=orig_cat_magerr, yerr=orig_ref_magerr,
+                linestyle='none', capsize=0, capthick=0, marker='D',
+                markeredgecolor='none', markersize=2, color='0.8',
+                label='all stars')
+    ax.errorbar(cat_mag, ref_mag,
+                xerr=cat_magerr, yerr=ref_magerr,
+                linestyle='none', capsize=0, capthick=0, marker='D',
+                markeredgecolor='none', markersize=2,
+                label='sigma-clipped stars')
+    x = np.asarray(ax.get_xlim())
+    y = odr.model.fcn(fit.beta, x)
+    ax.plot(x, y, label='fit')
+    ax.set_ylabel('reference catalog magnitude')
+    ax.legend(loc='upper left')
+    plt.setp(ax.get_xticklabels(), visible=False)
+
+    ax = fig.add_subplot(gs[1], sharex=ax)
+    orig_resid = orig_ref_mag - odr.model.fcn(fit.beta, orig_cat_mag)
+    ax.errorbar(orig_cat_mag, orig_resid,
+                xerr=orig_cat_magerr, yerr=orig_ref_magerr,
+                linestyle='none', capsize=0, capthick=0, marker='D',
+                markeredgecolor='none', markersize=2, color='0.8')
+    resid = ref_mag - odr.model.fcn(fit.beta, cat_mag)
+    ax.errorbar(cat_mag, resid,
+                xerr=cat_magerr, yerr=ref_magerr,
+                linestyle='none', capsize=0, capthick=0, marker='D',
+                markeredgecolor='none', markersize=2)
+    ax.plot(x, np.zeros_like(x))
+    ax.set_xlabel('source catalog magnitude')
+    ax.set_ylabel('residual')
+    fig.savefig(args.plot)
