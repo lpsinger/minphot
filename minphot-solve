@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 
 # Imports
-from __future__ import division
+from __future__ import division, print_function
 import argparse
+from astropy.io import fits
 from astropy.table import Table
 from astropy.coordinates import Angle, SkyCoord
 from astroquery.sdss import SDSS
+import astropy.units as u
 import numpy as np
 import scipy.odr
 
@@ -25,12 +27,23 @@ parser.add_argument(
     '--sigma-clip', metavar='NSIGMA', type=float, default=3,
     help='maximum number of standard deviations for sigma-clipping [default: %(default)s]')
 parser.add_argument(
+    '--snr', metavar='SNR', type=float, default=5,
+    help='SNR for limiting magngitude [default: %(default)s]')
+parser.add_argument(
     '--plot', metavar='PLOT.png',
     help='optional output file for diagnostic plots')
 args = parser.parse_args()
 
 # Read input catalog
-cat = Table.read(args.catalog, hdu='LDAC_OBJECTS')
+hdus = fits.open(args.catalog)
+imhead = fits.Header.fromstring(
+    '\n'.join('\n'.join(card for card in header) for header
+    in hdus['LDAC_IMHEAD'].data['Field Header Card']), sep='\n')
+cat = Table.read(hdus['LDAC_OBJECTS'])
+cat.rename_column('ALPHAWIN_J2000', 'ra')
+cat.rename_column('DELTAWIN_J2000', 'dec')
+cat.rename_column('MAG_AUTO', 'mag')
+cat.rename_column('MAGERR_AUTO', 'emag')
 
 # Clean up input catalog
 cat = cat[
@@ -39,17 +52,19 @@ cat = cat[
 ]
 del cat['FLAGS']
 
-cat_coords = SkyCoord(cat['ALPHAWIN_J2000'], cat['DELTAWIN_J2000'])
+cat_coords = SkyCoord(cat['ra'], cat['dec'])
 
 # Calculate field for reference catalog query
 center = SkyCoord(cat_coords.cartesian.sum(), representation='unitspherical')
 radius = center.separation(cat_coords).max() + args.match_radius
 
 # Obtain reference catalog
-ref_mag_key = 'psfMag_' + band
-ref_magerr_key = 'psfMagerr_' + band
-fields = ['ra', 'dec', 'type', 'clean', ref_mag_key, ref_magerr_key]
+mag_key = 'psfMag_' + band
+magerr_key = 'psfMagerr_' + band
+fields = ['ra', 'dec', 'type', 'clean', mag_key, magerr_key]
 ref = SDSS.query_region(center, radius=radius, photoobj_fields=fields)
+ref.rename_column(mag_key, 'mag')
+ref.rename_column(magerr_key, 'emag')
 
 # Clean up reference catalog
 ref = ref[
@@ -58,7 +73,7 @@ ref = ref[
     # Keep only clean photometry
     (ref['clean'] == 1) &
     # Keep only sane photometry
-    (ref[ref_mag_key] > 0)
+    (ref['mag'] > 0)
 ]
 del ref['type'], ref['clean']
 
@@ -70,22 +85,14 @@ keep = sep < args.match_radius
 ref_matches = ref[idx[keep]]
 cat_matches = cat[keep]
 
-# Get photometry of matching stars
-cat_mag = -2.5 * np.log10(cat_matches['FLUX_AUTO'])
-cat_magerr = 2.5 / np.log(10) * cat_matches['FLUXERR_AUTO'] / cat_matches['FLUX_AUTO']
-ref_mag = ref_matches[ref_mag_key]
-ref_magerr = ref_matches[ref_magerr_key]
-
-orig_cat_mag = cat_mag
-orig_ref_mag = ref_mag
-orig_cat_magerr = cat_magerr
-orig_ref_magerr = ref_magerr
+orig_cat_matches = cat_matches
+orig_ref_matches = ref_matches
 
 # Calculate photometric solution with outlier rejection
 for _ in range(args.sigma_clip_iters):
     # Perform orthogonal data regression
-    # data = scipy.odr.RealData(cat_mag, ref_mag, sx=cat_magerr, sy=ref_magerr)
-    data = scipy.odr.RealData(cat_mag, ref_mag, sx=cat_magerr, sy=ref_magerr)
+    data = scipy.odr.RealData(cat_matches['mag'], ref_matches['mag'],
+                              sx=cat_matches['emag'], sy=ref_matches['emag'])
     odr = scipy.odr.ODR(data, scipy.odr.unilinear)
     fit = odr.run()
 
@@ -93,26 +100,36 @@ for _ in range(args.sigma_clip_iters):
     dy2 = np.square(fit.eps)
     ds = np.sqrt(dx2 / np.mean(dx2) + dy2 / np.mean(dy2))
     keep = ds < args.sigma_clip
-    cat_mag = cat_mag[keep]
-    ref_mag = ref_mag[keep]
-    cat_magerr = cat_magerr[keep]
-    ref_magerr = ref_magerr[keep]
+    cat_matches = cat_matches[keep]
+    ref_matches = ref_matches[keep]
+
+# Calculate limiting magnitude
+mag = odr.model.fcn(fit.beta, cat_matches['mag'])
+emag = cat_matches['emag']
+maglimit = np.polyval(np.polyfit(np.log(1 / emag), mag, 1), np.log(args.snr))
+
+# Calculate seeing
+seeing = imhead['SEXSFWHM']
+
+# Print diagnostics
+print('seeing:', np.around(seeing, 2))
+print('limiting magnitude:', np.around(maglimit, 2))
 
 if args.plot:
     from matplotlib import pyplot as plt
     from matplotlib.gridspec import GridSpec
 
-    fig = plt.figure(figsize=(6, 8))
-    gs = GridSpec(2, 1, height_ratios=[3, 1], hspace=0.1)
-    ax = fig.add_subplot(gs[0])
+    fig = plt.figure(figsize=(12, 8))
+    gs = GridSpec(2, 2, height_ratios=[3, 1], hspace=0.1)
 
-    ax.errorbar(orig_cat_mag, orig_ref_mag,
-                xerr=orig_cat_magerr, yerr=orig_ref_magerr,
+    ax = fig.add_subplot(gs[0, 0])
+    ax.errorbar(orig_cat_matches['mag'], orig_ref_matches['mag'],
+                xerr=orig_cat_matches['emag'], yerr=orig_ref_matches['emag'],
                 linestyle='none', capsize=0, capthick=0, marker='D',
                 markeredgecolor='none', markersize=2, color='0.8',
                 label='all stars')
-    ax.errorbar(cat_mag, ref_mag,
-                xerr=cat_magerr, yerr=ref_magerr,
+    ax.errorbar(cat_matches['mag'], ref_matches['mag'],
+                xerr=cat_matches['emag'], yerr=ref_matches['emag'],
                 linestyle='none', capsize=0, capthick=0, marker='D',
                 markeredgecolor='none', markersize=2,
                 label='sigma-clipped stars')
@@ -123,18 +140,27 @@ if args.plot:
     ax.legend(loc='upper left')
     plt.setp(ax.get_xticklabels(), visible=False)
 
-    ax = fig.add_subplot(gs[1], sharex=ax)
-    orig_resid = orig_ref_mag - odr.model.fcn(fit.beta, orig_cat_mag)
-    ax.errorbar(orig_cat_mag, orig_resid,
-                xerr=orig_cat_magerr, yerr=orig_ref_magerr,
+    ax = fig.add_subplot(gs[1, 0], sharex=ax)
+    orig_resid = orig_ref_matches['mag'] - odr.model.fcn(
+        fit.beta, orig_cat_matches['mag'])
+    ax.errorbar(orig_cat_matches['mag'], orig_resid,
+                xerr=orig_cat_matches['emag'], yerr=orig_ref_matches['emag'],
                 linestyle='none', capsize=0, capthick=0, marker='D',
                 markeredgecolor='none', markersize=2, color='0.8')
-    resid = ref_mag - odr.model.fcn(fit.beta, cat_mag)
-    ax.errorbar(cat_mag, resid,
-                xerr=cat_magerr, yerr=ref_magerr,
+    resid = ref_matches['mag'] - odr.model.fcn(fit.beta, cat_matches['mag'])
+    ax.errorbar(cat_matches['mag'], resid,
+                xerr=cat_matches['emag'], yerr=ref_matches['emag'],
                 linestyle='none', capsize=0, capthick=0, marker='D',
                 markeredgecolor='none', markersize=2)
     ax.plot(x, np.zeros_like(x))
     ax.set_xlabel('source catalog magnitude')
     ax.set_ylabel('residual')
+
+    ax = fig.add_subplot(gs[:, 1], aspect=1)
+    ax.plot(orig_cat_matches['XWIN_IMAGE'], orig_cat_matches['YWIN_IMAGE'],
+            '.', color='0.8', markeredgecolor='none')
+    ax.plot(cat_matches['XWIN_IMAGE'], cat_matches['YWIN_IMAGE'],
+            '.', color='blue', markeredgecolor='none')
+    ax.set_xlabel('XWIN_IMAGE')
+    ax.set_ylabel('XWIN_IMAGE')
     fig.savefig(args.plot)
