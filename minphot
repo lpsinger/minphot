@@ -24,6 +24,9 @@ with open('Makefile', 'w') as f:
     print(file=f)
     print('%.cat: %.fits', file=f)
     print('\tsex $< -c', os.path.join(srcpath, 'sextractor.config'), '-PARAMETERS_NAME', os.path.join(srcpath, 'sextractor.param'), '-FILTER_NAME', os.path.join(srcpath, 'sextractor.conv'), '-CATALOG_NAME $@', file=f)
+    print(file=f)
+    print('%.solved.cat: %.calibrated.cat', file=f)
+    print('\t' + os.path.join(srcpath, 'minphot-solve'), '$< -o $@', file=f)
 
     target = 'bias.fits'
     clean_targets.append(target)
@@ -61,23 +64,27 @@ with open('Makefile', 'w') as f:
                         fits_targets.append(target)
                         clean_targets.append(target)
                         target = r['file'].replace('.fits', '.calibrated.cat')
+                        clean_targets.append(target)
+                        target = target.replace('calibrated', 'solved')
                         all_targets.append(target)
                         clean_targets.append(target)
                     print(file=f)
                     print(*head_targets, end='', file=f)
                     print(':', *cat_targets, file=f)
                     print('\tscamp', '-WRITE_XML', 'N', '$^', file=f)
-                    target = obj + '.' + filt + '.fits'
+                    target = obj + '.' + filt + '.calibrated.fits'
                     all_targets.append(target)
                     clean_targets.append(target)
                     print(file=f)
                     print(target, ':', *(fits_targets + head_targets), file=f)
                     print('\tswarp', '-WRITE_XML', 'N', '-IMAGEOUT_NAME', '$@', *fits_targets, file=f)
-                    cat_target = obj + '.' + filt + '.cat'
-                    all_targets.append(cat_target)
+                    cat_target = obj + '.' + filt + '.calibrated.cat'
                     clean_targets.append(cat_target)
                     print(file=f)
                     print(cat_target, ':', target, file=f)
+                    target = cat_target.replace('calibrated', 'solved')
+                    all_targets.append(target)
+                    clean_targets.append(target)
 
     print(file=f)
     print('all:', *all_targets, file=f)

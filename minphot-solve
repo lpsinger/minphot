@@ -32,6 +32,9 @@ parser.add_argument(
 parser.add_argument(
     '--plot', metavar='PLOT.png',
     help='optional output file for diagnostic plots')
+parser.add_argument(
+    '--output', '-o', metavar='OUTPUT.fits',
+    help='output for photometrically solved catalog')
 args = parser.parse_args()
 
 # Read input catalog
@@ -103,17 +106,22 @@ for _ in range(args.sigma_clip_iters):
     cat_matches = cat_matches[keep]
     ref_matches = ref_matches[keep]
 
-# Calculate limiting magnitude
-mag = odr.model.fcn(fit.beta, cat_matches['mag'])
-emag = cat_matches['emag']
-maglimit = np.polyval(np.polyfit(np.log(1 / emag), mag, 1), np.log(args.snr))
+def odr_predict(output, model, x, sx=0):
+    b = output.beta
+    Cb = output.cov_beta
+    y = model.fcn(b, x)
+    Jb = model.fjacb(b, x)
+    Jx = model.fjacd(b, x)
+    Cy = np.dot(np.dot(Jb.T, Cb), Jb) + np.dot(Jx.T, Jx) * np.square(sx)
+    sy = np.diag(np.sqrt(Cy))
+    return y, sy
 
-# Calculate seeing
-seeing = imhead['SEXSFWHM']
+# Calculate calibrated photometry
+mag, emag = odr_predict(fit, odr.model, cat_matches['mag'], cat_matches['emag'])
 
-# Print diagnostics
-print('seeing:', np.around(seeing, 2))
-print('limiting magnitude:', np.around(maglimit, 2))
+# Fit limiting magnitude
+maglimit = np.polyval(
+    np.polyfit(np.log(1 / cat_matches['emag']), mag, 1), np.log(args.snr))
 
 if args.plot:
     from matplotlib import pyplot as plt
@@ -164,3 +172,19 @@ if args.plot:
     ax.set_xlabel('XWIN_IMAGE')
     ax.set_ylabel('XWIN_IMAGE')
     fig.savefig(args.plot)
+
+    fig = plt.figure()
+    plt.semilogy(mag, mag / emag, '.')
+    plt.axhline(args.snr)
+    fig.savefig('bg.png')
+
+# Calculate seeing
+seeing = imhead['SEXSFWHM']
+
+# Prepare catalog for output
+cat = cat_matches['ra', 'dec']
+cat['mag'] = mag
+cat['emag'] = emag
+cat.meta['MAGLIMIT'] = maglimit
+cat.meta['SEEING'] = seeing
+cat.write(args.output, format='fits', overwrite=True)
