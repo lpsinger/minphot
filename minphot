@@ -16,6 +16,9 @@ clean_targets = []
 with open('Makefile', 'w') as f:
     print('.DEFAULT_GOAL := all', file=f)
     print(file=f)
+    print('%.calibrated.fits: %.flatfielded.fits %.flatfielded.head', file=f)
+    print('\tmissfits $^ -c', os.path.join(srcpath, 'missfits.config'), '&& mv $*.flatfielded.miss.fits $@', file=f)
+    print(file=f)
     print('%.fits:', file=f)
     print('\t' + os.path.join(srcpath, 'minphot-combine'), '$^ -o $@', file=f)
     print(file=f)
@@ -43,17 +46,23 @@ with open('Makefile', 'w') as f:
                     cat_targets = []
                     head_targets = []
                     for r in g3:
-                        target = 'reduced.' + r['file'].replace('.fits', '.cat')
+                        target = r['file'].replace('.fits', '.flatfielded.cat')
                         cat_targets.append(target)
                         clean_targets.append(target)
-                        target = 'reduced.' + r['file'].replace('.fits', '.head')
+                        target = r['file'].replace('.fits', '.flatfielded.head')
                         head_targets.append(target)
                         clean_targets.append(target)
-                        target = 'reduced.' + r['file']
-                        fits_targets.append(target)
+                        target = r['file'].replace('.fits', '.flatfielded.fits')
                         clean_targets.append(target)
                         print(file=f)
                         print(target, ':', r['file'], filt + '.flat.fits', 'bias.fits', file=f)
+                        target = r['file'].replace('.fits', '.calibrated.fits')
+                        all_targets.append(target)
+                        fits_targets.append(target)
+                        clean_targets.append(target)
+                        target = r['file'].replace('.fits', '.calibrated.cat')
+                        all_targets.append(target)
+                        clean_targets.append(target)
                     print(file=f)
                     print(*head_targets, end='', file=f)
                     print(':', *cat_targets, file=f)
