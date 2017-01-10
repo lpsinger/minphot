@@ -1,0 +1,50 @@
+#!/usr/bin/env python
+import argparse
+import numpy as np
+from astropy.table import Table
+from astropy import units as u
+from astropy.coordinates import SkyCoord, Latitude, Longitude, Angle
+
+parser = argparse.ArgumentParser()
+parser.add_argument('targets', metavar='TARGETS.txt')
+parser.add_argument('inputs', metavar='INPUT.cat', nargs='+')
+parser.add_argument(
+    '--match-radius', metavar='ARCSEC', type=Angle, default='1"',
+    help='catalog cross-match radius [default: %(default)s]')
+args = parser.parse_args()
+
+def _read_target_list(filename):
+    with open(filename) as f:
+        for line in f:
+            fields = line.split()
+            if fields:
+                name = fields[0]
+                ra = Longitude(':'.join(fields[1:4]), unit=u.hourangle).deg
+                dec = Latitude(':'.join(fields[4:7]), unit=u.deg).deg
+                yield name, ra, dec
+
+def read_target_list(filename):
+    name, ra, dec = zip(*_read_target_list(args.targets))
+    table = Table([name, ra, dec], names=['name', 'ra', 'dec'])
+    table['ra'].unit = table['dec'].unit = u.deg
+    return table
+
+targets = read_target_list(args.targets)
+target_coords = SkyCoord(targets['ra'], targets['dec'])
+
+results = []
+for filename in args.inputs:
+    cat = Table.read(filename)
+    print(cat.meta)
+    cat_coords = SkyCoord(cat['ra'], cat['dec'])
+    idx, sep, _ = target_coords.match_to_catalog_sky(cat_coords)
+    keep = sep < args.match_radius
+    target_matches = targets[keep]
+    cat_matches = cat[idx[keep]]
+    print(sep.min())
+    for target_match, cat_match in zip(target_matches, cat_matches):
+        results.append([target_match['name'], filename, cat_match['mag'], cat_match['emag'], cat.meta['MAGLIMIT']])
+
+print(results)
+results = Table(rows=results, names='name filename mag emag maglimit'.split())
+results.pprint(max_lines=-1, max_width=-1)
