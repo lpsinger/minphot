@@ -1,6 +1,6 @@
 # MINPHOT
 
-Minimalist photometric data reduction pipeline
+Minimalist photometric data reduction pipeline. Currently, supports the [Large Monolithic Imager (LMI)](https://jumar.lowell.edu/confluence/display/DCTIC/LMI) on the [4.3-m Discovery Channel Telescope (DCT)](https://lowell.edu/research/research-facilities/4-3-meter-dct/) at [Lowell Observatory](https://lowell.edu).
 
 ## Dependencies
 
