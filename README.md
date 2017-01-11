@@ -13,5 +13,20 @@ To install these dependencies on Mac OS:
 
 ## Instructions
 
+1.  Check out anywhere you like:
 
+        $ git clone https://github.com/lpsinger/minphot.git /path/to/src
 
+2.  Change to the directory that contains your raw images:
+
+        $ cd /path/to/raw
+
+3.  Run `minphot`, passing the filenames of your raw images to it. It will examine the image headers, generate a Makefile, and then run make:
+
+        $ /path/to/src/minphot lmi.????.fits
+
+    *Note*: after this stage, you can run `make clean` to nuke the analysis data products (leaving the raw images intact), or run `make` to redo any part of the analysis.
+
+4.  Last, you can extract photometry of individual targets:
+
+        $ /path/to/src/minphot-summarize targets.lis *.solved.cat
